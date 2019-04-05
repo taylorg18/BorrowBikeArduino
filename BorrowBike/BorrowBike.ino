@@ -2,8 +2,6 @@
 Borrow Bike arduino program to handle checking in/out bikes
 and handle theft
 
-General flow is
-
 
 ************************************************************/
 
@@ -23,12 +21,13 @@ General flow is
 //////////////////////////////
 // Replace these two character strings with the name and
 // password of your WiFi network.
-const char mySSID[] = "Brewskis_v2";
-const char myPSK[] = "teamJOE2018";
-bool wifi_connected;
-bool checkedin;
-bool locked;
-int last_user;
+const char mySSID[] = "";
+const char myPSK[] = "";
+
+bool wifi_connected; //bool to say if wifi is connected
+bool checkedin; //bool to say if the bike is available
+bool locked; //bool to say if the bike is locked
+int last_user; //ID of the last user
 // To use the ESP8266 as a TCP client, use the 
 // ESP8266Client class. First, create an object:
 ESP8266Client client;
@@ -37,6 +36,19 @@ ESP8266Client client;
 // HTTP Strings //
 //////////////////
 const char destServer[] = "http://www.the-borrow-bike.us-west-2.elasticbeanstalk.com";
+
+const char error_message[] = "PUT /api/Bikes/1 HTTP/1.1\n"
+                             "Host: www.the-borrow-bike.us-west-2.elasticbeanstalk.com\n"
+                             "content-type: application/json\n"
+                             "content-length: 34\n\n"
+                             "{\"Bike_ID\": \"1\",\"Status\": \"Error\"}";
+
+
+const char checkin_message[] = "PUT /api/Bikes/1 HTTP/1.1\n"
+                             "Host: www.the-borrow-bike.us-west-2.elasticbeanstalk.com\n"
+                             "content-type: application/json\n"
+                             "content-length: 38\n\n"
+                             "{\"Bike_ID\": \"1\",\"Status\": \"Available\"}";
 
  
 #define uchar unsigned char
@@ -53,8 +65,8 @@ AddicoreRFID myRFID; // create AddicoreRFID object to control the RFID module
 const int chipSelectPin = 10;
 const int NRSTPD = 5;
 int solenoidPin = 4;  
-int tone_pin = 3;
-int cable_pin = 2;
+int tone_pin = 2;
+int cable_pin = 3;
 
 //Maximum length of the array
 #define MAX_LEN 16
@@ -66,7 +78,7 @@ int cable_pin = 2;
 void setup() 
 {
   pinMode(solenoidPin, OUTPUT); 
-  pinMode(cable_pin, INPUT);
+  pinMode(cable_pin, INPUT_PULLUP);
   // Serial Monitor is used to control the demo and view
   // debug information.
   Serial.begin(9600);
@@ -87,16 +99,13 @@ void setup()
   pinMode(NRSTPD,OUTPUT);                     // Set digital pin 10 , Not Reset and Power-down
   digitalWrite(NRSTPD, HIGH);
     
-    //Serial.println("DONE SETUP");
-
   myRFID.AddicoreRFID_Init();  
-  locked = true;
+  checkedin = true;
 }
 
 // Main Program Loop
 void loop() 
 {
-
   if(wifi_connected == false)
   {
      // initializeESP8266() verifies communication with the WiFi
@@ -106,10 +115,9 @@ void loop()
     // connectESP8266() connects to the defined WiFi network.
     connectESP8266();
   }
-  int temp = digitalRead(cable_pin);
-  Serial.println(temp);
   
-  //digitalWrite(solenoidPin, HIGH);
+  int cable_value = digitalRead(cable_pin); //read status of cable  
+  digitalWrite(solenoidPin, LOW); //Set the magnet to off
 
   uchar i, tmp, checksum1;
   uchar status;
@@ -120,48 +128,58 @@ void loop()
 
         str[1] = 0x4400;
 
-  // TODO Handle the cable being cut.
-  //if(locked and 
+  if(locked and cable_value == HIGH)
+  {
+    //report error/theft
+    report_theft();
+  }
+
+  //Cable is connected so try and return bike
+  if(cable_value == LOW and checkedin == false)
+  {
+    //return bike
+    checkedin = checkin_bike(char data[]);
+    locked = true;
+  }
   
   //Find tags, return tag type
   status = myRFID.AddicoreRFID_Request(PICC_REQIDL, str); 
-
-  //Anti-collision, return tag serial number 4 bytes
+ //Anti-collision, return tag serial number 4 bytes
   status = myRFID.AddicoreRFID_Anticoll(str);
+  
   // Checkout bike if the card worked, the bike is checked in and wifi is connected
   if (status == MI_OK and checkedin == true and wifi_connected == true)
   {
-    //checksum1 = str[0] ^ str[1] ^ str[2] ^ str[3];
-    Serial.print("The tag's number is:\t");
-    Serial.println(int(str[0]));
     char cstr[16];
     itoa(int(str[0]), cstr, 10);
     char data[] = "{\"Bike_ID\": \"1\",\"User_ID\": \"";
     char ending[] = "\"}\n";
     strcat(data, cstr);
     strcat(data, ending);
-    Serial.println(data);
-    
+        
     bool res = false;
+    //digitalWrite(solenoidPin, HIGH);
     res = checkout_bike(data);
 
+    // IF successful check out
     if(res)
     {
-      checkedin = false;
-      last_user = int(str[0]);
-      digitalWrite(solenoidPin, LOW);
-      tone(tone_pin, 500, 3000);
-      noTone(tone_pin);
-      locked = false;
-      delay(3000);
-      digitalWrite(solenoidPin, HIGH);
+      
+      checkedin = false; // false so checkout
+      last_user = int(str[0]); // save last user
+      digitalWrite(solenoidPin, HIGH); // release the magnet
+      tone(tone_pin, 500, 3000); // play a tone
+      noTone(tone_pin); //turn off tone
+      locked = false; // set it to unlocked
+      delay(5000); // wait 5 seconds
+      //digitalWrite(solenoidPin, LOW);
 
     }
     else
     {
       wifi_connected = false;
-       tone(tone_pin, 100, 1000);
-       noTone(tone_pin);
+      tone(tone_pin, 100, 1000);
+      noTone(tone_pin);
     }
    
   }
@@ -170,14 +188,13 @@ void loop()
     int user = int(str[0]);
     if(user == last_user)
     {
-      digitalWrite(solenoidPin, LOW);
+      digitalWrite(solenoidPin, HIGH);
       tone(tone_pin, 500, 3000);
       noTone(tone_pin);
       locked = false;
-      delay(3000);
+      delay(5000);
       digitalWrite(solenoidPin, LOW);
     }
-    
   }
   else
   {
@@ -189,6 +206,7 @@ void loop()
   
 }
 
+//Set up the wifi shield
 void initializeESP8266()
 {
   // esp8266.begin() verifies that the ESP8266 is operational
@@ -206,6 +224,7 @@ void initializeESP8266()
   Serial.println("ESP8266 Shield Present");
 }
 
+// Connect to wifi
 void connectESP8266()
 {
   // The ESP8266 can be set to one of three modes:
@@ -251,14 +270,48 @@ void connectESP8266()
     }
     else
     {
+      Serial.println("Connected");
       wifi_connected = true;
     }
   }
 }
 
+//Try and checkin the bike
 bool checkin_bike(char data[])
 {
-  //TODO Handle checkin
+  int i = 0;
+  int retVal = client.connect(destServer, 80);
+  //try and connect to website up to 10 times before erring out
+  while(i < 10 and retVal<=0)
+  {
+    retVal = client.connect(destServer, 80);
+    if (retVal <= 0)
+    {
+      Serial.println(F("Failed to connect to server."));
+    }
+    i = i + 1;
+  }
+  if (retVal <= 0)
+  {
+    Serial.println(F("Failed to connect to server."));
+    return false;
+  }
+
+  // print and write can be used to send data to a connected
+  // client connection.
+  client.print(checkin_message);
+ 
+  // available() will return the number of characters
+  // currently in the receive buffer.
+  while (client.available())
+    Serial.write(client.read()); // read() gets the FIFO char
+  
+  // connected() is a boolean return value - 1 if the 
+  // connection is active, 0 if it's closed.
+  if (client.connected())
+    client.stop(); // stop() closes a TCP connection.
+
+  return true;
 }
 
 // Handle checking out the bike
@@ -281,7 +334,7 @@ bool checkout_bike(char data[])
   strcat(requestSize, "\n\n");
   strcat(requestSize, data);
   strcat(httpHead, requestSize);
-  Serial.println(httpHead);
+  //Serial.println(httpHead);
  
   // ESP8266Client connect([server], [port]) is used to 
   // connect to a server (const char * or IPAddress) on
@@ -290,6 +343,7 @@ bool checkout_bike(char data[])
   // negative on fail (-1=TIMEOUT, -3=FAIL).
   int i = 0;
   int retVal = client.connect(destServer, 80);
+  // If it doesn't connect try and connect up to 10 times
   while(i < 10 and retVal<=0)
   {
     retVal = client.connect(destServer, 80);
@@ -305,7 +359,6 @@ bool checkout_bike(char data[])
     Serial.println(F("Failed to connect to server."));
     return false;
   }
-
   
   // print and write can be used to send data to a connected
   // client connection.
@@ -314,8 +367,9 @@ bool checkout_bike(char data[])
  
   // available() will return the number of characters
   // currently in the receive buffer.
-  while (client.available())
-    Serial.write(client.read()); // read() gets the FIFO char
+  // I don't think this section is necessary
+  //while (client.available())
+    //Serial.write(client.read()); // read() gets the FIFO char
   
   // connected() is a boolean return value - 1 if the 
   // connection is active, 0 if it's closed.
@@ -328,10 +382,9 @@ bool checkout_bike(char data[])
 // Function to report the cable being cut
 void report_theft()
 {
-  //TODO Put message for error, need to sit down with Aaron for this
-  char stolen[] = "";
   int i = 0;
   int retVal = client.connect(destServer, 80);
+  // Only try and send a message to website 4 times, else continue
   while(i < 4 and retVal<=0)
   {
     retVal = client.connect(destServer, 80);
@@ -348,11 +401,10 @@ void report_theft()
   }
   else
   {
-    client.print(stolen);
+    client.print(error_message);
   }
 
-  //LOOP ALARM FOREVER
-
+  //LOOP ALARM FOREVER - should be an annoying high pitch
   for(;;)
   {
     tone(tone_pin, 10000, 100000000);
